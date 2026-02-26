@@ -557,15 +557,17 @@ export class Game {
 
     this._keys      = {};
     this._highScore = parseInt(localStorage.getItem('neonVelocity_hs') || '0');
+    this._loadT0    = null;   // set on first loading-screen render
 
     this._bindInput();
   }
 
   async start() {
-    await this.sdk.init();
-    window.addEventListener('beforeunload', () => this.sdk.savePoints());
-    this.state = STATE.MENU;
+    // Start the render loop immediately so the loading screen shows at once
     requestAnimationFrame(ts => this._loop(ts));
+    window.addEventListener('beforeunload', () => this.sdk.savePoints());
+    await this.sdk.init();
+    this.state = STATE.MENU;
   }
 
   // ─── Input ────────────────────────────────────────────────────────────────
@@ -825,6 +827,7 @@ export class Game {
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
     this._drawBg(ctx);
 
+    if (this.state === STATE.LOADING)   { this._drawLoading(ctx, t);  this._drawScanlines(ctx); return; }
     if (this.state === STATE.MENU)      { this._drawMenu(ctx, t);     this._drawScanlines(ctx); return; }
     if (this.state === STATE.GAME_OVER) { this._drawGameOver(ctx, t); this._drawScanlines(ctx); return; }
 
@@ -1080,6 +1083,134 @@ export class Game {
       ctx.shadowBlur  = 12;
       ctx.fillText('[ SPACE TO PLAY AGAIN ]', CANVAS_W / 2, 448);
     }
+
+    ctx.restore();
+  }
+
+  _drawLoading(ctx, t) {
+    if (this._loadT0 === null) this._loadT0 = t;
+    const elapsed = (t - this._loadT0) / 1000;   // seconds since loading started
+    const W = CANVAS_W, H = CANVAS_H;
+
+    // ── Scrolling perspective grid ──────────────────────────────────────────
+    const GRID_SPEED = 90;  // px/s
+    const horizY     = H * 0.52;
+    const vp         = { x: W / 2, y: horizY };
+
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.strokeStyle = '#cc00ff';
+    ctx.lineWidth   = 1;
+
+    // Vertical grid lines (perspective)
+    const gridCols = 9;
+    for (let i = 0; i <= gridCols; i++) {
+      const frac  = i / gridCols;              // 0..1
+      const xBot  = W * frac;
+      const xTop  = vp.x + (xBot - vp.x) * 0.12;
+      ctx.beginPath();
+      ctx.moveTo(xTop, horizY);
+      ctx.lineTo(xBot, H);
+      ctx.stroke();
+    }
+
+    // Horizontal grid lines (scrolling)
+    const hCount = 10;
+    for (let i = 0; i < hCount; i++) {
+      const phase = ((elapsed * GRID_SPEED / H) + i / hCount) % 1;  // 0..1
+      const rawY  = horizY + (H - horizY) * Math.sqrt(phase);        // perspective squish
+      const frac  = (rawY - horizY) / (H - horizY);
+      const xL    = vp.x - (vp.x) * frac * 1.0;
+      const xR    = vp.x + (W - vp.x) * frac * 1.0;
+      ctx.globalAlpha = 0.08 + 0.20 * frac;
+      ctx.beginPath();
+      ctx.moveTo(xL, rawY);
+      ctx.lineTo(xR, rawY);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // ── "NEON VELOCITY" title ───────────────────────────────────────────────
+    const hue   = (elapsed * 60) % 360;   // slow colour cycle
+    const pulse = 0.7 + 0.3 * Math.sin(elapsed * 3.5);
+
+    ctx.save();
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+
+    // "NEON" — large
+    const neonCol = `hsl(${hue},100%,65%)`;
+    ctx.font        = 'bold 76px "Courier New", monospace';
+    ctx.shadowColor = neonCol;
+    ctx.shadowBlur  = 32 * pulse;
+    ctx.fillStyle   = '#ffffff';
+    ctx.fillText('NEON', W / 2, H * 0.28);
+
+    // "VELOCITY" — slightly smaller, offset hue
+    const velCol = `hsl(${(hue + 150) % 360},100%,65%)`;
+    ctx.font        = 'bold 48px "Courier New", monospace';
+    ctx.shadowColor = velCol;
+    ctx.shadowBlur  = 24 * pulse;
+    ctx.fillStyle   = velCol;
+    ctx.fillText('VELOCITY', W / 2, H * 0.38);
+
+    // Subtitle
+    ctx.font        = '13px "Courier New", monospace';
+    ctx.shadowBlur  = 6;
+    ctx.shadowColor = '#ff00ff';
+    ctx.fillStyle   = '#cc88ff';
+    ctx.fillText('TOP-DOWN SYNTHWAVE RACER', W / 2, H * 0.45);
+
+    ctx.restore();
+
+    // ── Progress bar ────────────────────────────────────────────────────────
+    const BAR_W   = 260;
+    const BAR_H   = 5;
+    const barX    = (W - BAR_W) / 2;
+    const barY    = H * 0.62;
+    // Ease-out fill: fills to 95% in ~2s, then holds until SDK ready
+    const rawProg = Math.min(elapsed / 2.2, 1.0);
+    const prog    = 1 - Math.pow(1 - rawProg, 3);   // cubic ease-out → approaches 1 asymptotically
+    const pct     = Math.min(Math.round(prog * 100), 99);  // never show 100% until actually done
+
+    // Track bg
+    ctx.save();
+    ctx.fillStyle   = '#1a0030';
+    ctx.shadowColor = '#ff00ff';
+    ctx.shadowBlur  = 6;
+    ctx.fillRect(barX - 2, barY - 2, BAR_W + 4, BAR_H + 4);
+
+    // Fill gradient
+    const grad = ctx.createLinearGradient(barX, 0, barX + BAR_W, 0);
+    grad.addColorStop(0,   '#ff00cc');
+    grad.addColorStop(0.5, '#ff66ff');
+    grad.addColorStop(1,   '#00ffee');
+    ctx.fillStyle   = grad;
+    ctx.shadowColor = '#ff44ff';
+    ctx.shadowBlur  = 14;
+    ctx.fillRect(barX, barY, BAR_W * prog, BAR_H);
+
+    // Shimmer at fill edge
+    const shimX = barX + BAR_W * prog - 6;
+    if (prog > 0.01) {
+      const shimA = 0.4 + 0.6 * Math.sin(elapsed * 8);
+      ctx.globalAlpha = shimA;
+      ctx.fillStyle   = '#ffffff';
+      ctx.shadowBlur  = 20;
+      ctx.fillRect(shimX, barY - 1, 6, BAR_H + 2);
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur  = 0;
+
+    // Percentage text
+    ctx.font        = '12px "Courier New", monospace';
+    ctx.textAlign   = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle   = '#cc88ff';
+    ctx.shadowColor = '#ff00ff';
+    ctx.shadowBlur  = 8;
+    ctx.fillText(`LOADING... ${pct}%`, W / 2, barY + BAR_H + 10);
 
     ctx.restore();
   }
